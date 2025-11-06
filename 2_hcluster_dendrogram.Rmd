@@ -37,7 +37,6 @@ library(cowplot)
 library(dendsort)
 
 # directories
-projectdirectory      <- "/data/rdandekar/rprojects/TBM_RNASeq_Analysis"
 resouce_dir           <- file.path(projectdirectory,"resources")
 input_dir             <- file.path(projectdirectory,"input")
 plot_dir              <- file.path(projectdirectory,"plots")
@@ -268,9 +267,7 @@ dplot_hc
 
 # 3. PDF
 ```{r}
-plot_dir_main     <- file.path('/data/sreddy/TBM_transcriptomic_figures')
-
-pdf(file = file.path(plot_dir_main,"hclust_dendrogram.pdf"),height = 2.0,width = 4.0)
+pdf(file = file.path(plot_dir,"hclust_dendrogram.pdf"),height = 2.0,width = 4.0)
 print(dplot_hc)
 dev.off()
 ```
