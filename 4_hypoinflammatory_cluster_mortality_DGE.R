@@ -29,7 +29,6 @@ BiocParallel::register(BiocParallel::SerialParam())
 # INPUT ----
 
 # Input 
-projectdirectory  <- "/data/rdandekar/rprojects/TBM_RNASeq_Analysis"
 input_dir         <- file.path(projectdirectory,"input")
 resource_dir      <- file.path(projectdirectory,"resources")
 processed_gene_counts_file    <- file.path(input_dir,"input_gene_count_matrix.csv")
