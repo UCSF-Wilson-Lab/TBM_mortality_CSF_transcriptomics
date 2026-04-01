@@ -1,0 +1,301 @@
+---
+title: "Test Cluster stability TBM"
+author: "Ravi Dandekar"
+date: "2026-03-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# START
+```{r}
+library(edgeR) 
+library(RColorBrewer)
+library(gplots)
+library(biomaRt) #converting gene names
+library(pheatmap)
+library(viridis)
+library(dplyr)
+library(tibble)
+library(magrittr)
+library(AnnotationDbi)
+library(stats4)
+library(BiocGenerics)
+library(gtools)
+library(openxlsx)
+library(EnhancedVolcano)
+library(stringr)
+library(data.table)
+
+library(DESeq2)
+library(uwot)
+library(gridExtra)
+library(ggplot2)
+library(cowplot)
+
+library(dendsort)
+
+# Testing cluster stability
+library(M3C)
+library(mclust)
+
+# Thresholds
+
+# Color Palettes
+COLOR_PAL <- colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100)
+break_1 <- seq(-2,1,0.059)  # first 51 breaks
+#break_1 <- seq(-1,1,0.04)  # first 51 breaks
+
+#break_2 <- seq(1,4,0.06)  # last 50 breaks
+#break_2 <- break_2[3:length(break_2)]
+break_2 <- seq(1,2,0.02)  # last 50 breaks
+break_2 <- break_2[2:length(break_2)]
+break_list1_4 <- c(break_1,break_2)
+
+COLOR_PAL_RAINBOW <- rainbow(10)
+
+# directories
+projectdirectory      <- "/data/rdandekar/rprojects/TBM_RNASeq_Analysis"
+resouce_dir           <- file.path(projectdirectory,"resources")
+input_dir             <- file.path(projectdirectory,"input")
+plot_dir              <- file.path(projectdirectory,"plots")
+table_dir             <- file.path(projectdirectory,"tables")
+object_dir            <- file.path(projectdirectory,"objects")
+
+# Input 
+processed_gene_counts_file  <- file.path(input_dir,"input_gene_count_matrix.csv")
+metadata_tbm_file           <- file.path(input_dir, "metadata_TBM_formatted.csv")
+biomart_metadata_fh         <- file.path(resouce_dir,"biomart_protein_coding_genes.tsv")
+```
+
+# --------------------
+
+# FUNCTIONS
+
+### runHierarchicalClustering
+```{r}
+runHierarchicalClustering <- function(input_df,k_clusters = 3,cluster_id_col_name = "cluster_id") {
+  dist_mat <- dist(as.matrix(input_df), method = "euclidean")
+  hclusters <- hclust(dist_mat, method = "ward.D2")
+  cluster_ids <- cutree(hclusters, k = k_clusters)
+
+  # Convert to dataframe
+  cluster_df <- as.data.frame(cluster_ids) %>% setNames(cluster_id_col_name)
+  cluster_df$Sample_ID <- row.names(cluster_df)
+  cluster_df           <- cluster_df[,c("Sample_ID",cluster_id_col_name)]
+  
+  cluster_df[,cluster_id_col_name] <- paste("cluster",cluster_df[,cluster_id_col_name],sep = "")
+  
+  return(cluster_df)
+}
+```
+
+# --------------------
+
+# 1. Load input data
+
+### a. load input dataframe and metadata
+```{r}
+df   <- read.csv(processed_gene_counts_file, row.names = 1,check.names = F)
+
+# biomart protein coding genes
+gene_metadata <- read.delim(biomart_metadata_fh,stringsAsFactors = F)
+
+# metadata
+metadata           <- read.csv(metadata_tbm_file, stringsAsFactors = FALSE)
+row.names(metadata) <- metadata$Sample_ID
+
+metadata <- metadata[metadata$Sample_ID %in% names(df),]
+metadata$Mortality <- as.factor(metadata$short_term_Mortality)
+metadata$Gender    <- as.factor(metadata$gender)
+metadata$Batch     <- as.numeric(metadata$BatchAnalysis)
+metadata$cohortbatch   <- paste("TBM",metadata$Batch,sep = "_") %>% as.factor()
+metadata$Status        <- metadata$death_shortterm
+metadata$Age        <- metadata$age
+metadata$TBM_status <- metadata$post_MNGS_TBM_status
+metadata$TBM_status[metadata$TBM_status %in% "Definite TBM"] <- "DefiniteTBM"
+metadata$TBM_status[metadata$TBM_status %in% "Probable TBM"] <- "ProbableTBM"
+metadata$mortality <-  ifelse(as.numeric(metadata$Mortality) > 1, "NonSurvivor", "Survivor")
+```
+
+### b. load cluster IDs and top var genes
+```{r}
+df_h_cluster_ids <- read.csv(file.path(table_dir,"cluster_ID_table_hierarchical_clustering_Oct2025.csv"),stringsAsFactors = F)
+df_top_var_genes <- read.csv(file = file.path(table_dir,"table_gene_variance_in_final_cohort.csv"),stringsAsFactors = F)
+```
+
+
+# 2. filter genes
+* non-zero values in at least 20% of samples
+* protein coding genes only
+```{r}
+CUTOFF = round(0.2*ncol(df))
+
+# Filter for genes detected in >=20% of samples
+keep <- rowSums(df>0) >= CUTOFF
+keep <- names(keep[keep == TRUE])
+
+df_filt <- df[keep,]
+```
+
+
+# 3. Normalize df using voom
+
+### a. model matrix
+```{r}
+# Make Model
+mm <-model.matrix(~ mortality + cohortbatch, data = metadata)
+
+# Change Dead vs Alive to Alive vs dead (Alive = 1, Dead = 0)
+#comp_col <- mm[,2]
+#comp_col[comp_col == 1] <- 2
+#comp_col[comp_col == 0] <- 1
+#comp_col[comp_col == 2] <- 0
+#mm[,2] <- comp_col
+
+row.names(mm) <- metadata$Sample_ID
+```
+
+### b. voom normalization
+```{r}
+vwts          <- voom(df_filt, mm, plot = T,normalize.method="quantile")
+
+model_weights <- vwts$weights
+df_norm_log   <- as.data.frame(vwts$E)
+
+### Filter for protein coding genes
+transcript_rows        <- row.names(df_norm_log)
+names(transcript_rows) <- tstrsplit(transcript_rows,"_")[[1]]
+transcript_rows_prot   <- transcript_rows[names(transcript_rows) %in% gene_metadata$hgnc_symbol] %>% as.character()
+
+df_norm_log_pc <- df_norm_log[row.names(df_norm_log) %in% transcript_rows_prot,]
+```
+
+
+# 4. Count non-zero protein coding genes
+```{r}
+df_bin <- df
+df_bin[df_bin > 0] <- 1
+
+transcript_rows <- row.names(df_bin)
+names(transcript_rows) <- tstrsplit(transcript_rows,"_")[[1]]
+transcript_rows_prot   <- transcript_rows[names(transcript_rows) %in% gene_metadata$hgnc_symbol] %>% as.character()
+
+df_bin_prot <- df_bin[row.names(df_bin) %in% transcript_rows_prot,]
+sample_gene_count_df <- colSums(df_bin_prot) %>% as.data.frame()
+names(sample_gene_count_df) <- "nonzero_gene_count"
+sample_gene_count_df$sample <- row.names(sample_gene_count_df)
+sample_gene_count_df$PID    <- tstrsplit(sample_gene_count_df$sample,"_")[[1]]
+
+sample_gene_count_df        <- sample_gene_count_df[,c("sample","PID","nonzero_gene_count")]
+```
+
+
+# 5. Create input for Clustering
+
+### a. input all protein coding genes
+```{r}
+input_df <- as.data.frame(t(df_norm_log_pc))
+```
+
+### b. input - subset the most variable genes
+* This could be the topp 1000 for example
+```{r}
+# Get the most variable genes
+top_genes <- df_top_var_genes[df_top_var_genes$top_1000 %in% "yes",]
+top_genes <- top_genes$gene_ensembl
+
+input_df_top_var <- input_df[,names(input_df) %in% top_genes]
+```
+
+# --------------------
+
+# Cluster stability
+
+# 1. make inputs
+```{r}
+# 1) Make the matrix M3C expects: rows = genes/features, columns = samples
+x_counts <- as.matrix(input_df_top_var)
+x <- t(x_counts)
+
+# change order in 
+row.names(df_h_cluster_ids) <- df_h_cluster_ids$Sample_ID
+df_h_cluster_ids            <- df_h_cluster_ids[colnames(x),]
+
+# Make safe sample IDs once, then use them everywhere
+orig_ids <- colnames(x)
+safe_ids <- make.names(orig_ids, unique = TRUE)
+
+colnames(x) <- safe_ids
+
+des <- data.frame(
+  ID = safe_ids,
+  hc_id = df_h_cluster_ids$cluster_id_hc_top_var[match(orig_ids, df_h_cluster_ids$Sample_ID)]
+)
+#row.names(des) <- des$ID
+```
+
+
+# 2. M3C evaluation
+* clusteralg = "hc"  - used to consistency of how our clusters were assembled
+* clusteralg = "pam" - default method for M3C consensus clustering
+```{r}
+stopifnot(identical(colnames(x), des$ID))
+stopifnot(nrow(des) == ncol(x))
+
+# 5) Run M3C with hierarchical clustering
+#debugonce(M3Creal)
+res <- M3C(
+  mydata     = as.data.frame(x),
+  des        = des,
+  clusteralg = "hc",
+  method     = 1,       # Monte Carlo null model
+  maxK       = 6,       # must be >= 3 for your case
+  iters      = 25,
+  repsref    = 100,
+  repsreal   = 100,
+  pItem      = 0.8,
+  objective  = "entropy",
+  seed       = 123,
+  removeplots = FALSE,
+  silent     = FALSE
+)
+
+# 6) Inspect overall K-level quality statistics
+res$scores
+```
+
+# 3. Extract results
+```{r}
+k <- 3
+
+# K-specific M3C outputs
+ann3  <- res$realdataresults[[k]]$ordered_annotation
+cc3   <- res$realdataresults[[k]]$consensus_matrix
+data3 <- res$realdataresults[[k]]$ordered_data
+
+# Match your provided cluster labels to the M3C-ordered samples
+cmp3 <- data.frame(
+  sample_id   = rownames(ann3),
+  des_cluster = des$hc_id[match(rownames(ann3), des$ID)],
+  m3c_cluster  = as.character(ann3$consensuscluster),
+  stringsAsFactors = FALSE
+)
+
+# Overall agreement between your labels and M3C's K=3 consensus labels
+tab3 <- table(cmp3$des_cluster, cmp3$m3c_cluster)
+ari3 <- adjustedRandIndex(cmp3$des_cluster, cmp3$m3c_cluster)
+
+tab3
+ari3
+
+# How each of your clusters aligns to the M3C clusters
+cluster_purity <- apply(tab3, 1, function(z) max(z) / sum(z))
+cluster_purity
+
+# Simple chi-squared test of association
+chisq.test(tab3)
+```
+
